@@ -140,34 +140,36 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 def clean_email_one(val: object) -> tuple[str, str | None]:
     """
-    Regla 5 ajustada:
-    - Si hay 2+ correos en la celda, toma el PRIMERO válido.
-    - Reporta advertencia.
+    Regla 5 robusta:
+    - Encuentra TODOS los correos dentro del texto (aunque haya basura)
+    - Toma el primero
+    - Si hay más de uno, lo reporta como advertencia
     """
     if pd.isna(val) or str(val).strip() == "":
         return ("", "Correo vacío")
 
     raw = remove_invisibles(str(val)).strip()
 
-    # separadores comunes en listas de correos
-    parts = re.split(r"[;,\|/]+", raw)
+    # Busca correos dentro del texto (aunque haya caracteres raros alrededor)
+    found = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", raw)
 
-    # si no hay separadores pero hay más de un '@', puede venir separados por espacios
-    if len(parts) == 1 and raw.count("@") > 1:
-        parts = re.split(r"\s+", raw)
+    if not found:
+        return ("", "No se encontró ningún correo válido en la celda")
 
-    candidates = [p.strip().replace(" ", "") for p in parts if p and p.strip()]
-    valid_emails = [c for c in candidates if EMAIL_RE.match(c)]
+    chosen = found[0].lower()
 
-    if not valid_emails:
-        return ("", "Correo inválido (o múltiples sin formato válido)")
+    # Advertencias
+    warnings = []
+    if len(found) > 1:
+        warnings.append(f"Había {len(found)} correos; se tomó el primero")
 
-    chosen = valid_emails[0].lower()
+    # Si la celda tiene más texto además del correo (basura), lo avisamos
+    # (esto ayuda a detectar casos como '*!!\"#!')
+    raw_compact = re.sub(r"\s+", " ", raw).strip()
+    if raw_compact.lower() != chosen and len(raw_compact) > len(chosen):
+        warnings.append("La celda contenía texto extra; se ignoró")
 
-    if len(valid_emails) > 1:
-        return (chosen, f"Había {len(valid_emails)} correos; se tomó el primero")
-
-    return (chosen, None)
+    return (chosen, " | ".join(warnings) if warnings else None)
 
 def clean_text_general(val: object) -> str:
     """
@@ -381,3 +383,4 @@ if st.button("🚀 Limpiar y generar archivos"):
         file_name=f"{base}_LIMPIO.csv",
         mime="text/csv",
     )
+
