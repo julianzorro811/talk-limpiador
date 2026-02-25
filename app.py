@@ -290,11 +290,11 @@ st.subheader("✅ Configuración rápida")
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    apt_col = st.selectbox("Columna Apartamento (Regla 4)", ["(Ninguna)"] + cols, index=0)
+    apt_col = st.selectbox("Columna Apartamento (Limpia caracteres especiales)", ["(Ninguna)"] + cols, index=0)
 with c2:
-    email_col = st.selectbox("Columna Correo (Regla 5)", ["(Ninguna)"] + cols, index=0)
+    email_col = st.selectbox("Columna Correo)", ["(Ninguna)"] + cols, index=0)
 with c3:
-    max30_cols = st.multiselect("Columnas con máximo 30 caracteres (Regla 6)", cols, default=[])
+    max30_cols = st.multiselect("Columnas con máximo 30 caracteres", cols, default=[])
 
 st.caption("NOMPROPIO siempre activo. Truncamiento a 30 siempre activo (solo en columnas seleccionadas) y se reporta en ERRORES.")
 
@@ -383,4 +383,5 @@ if st.button("🚀 Limpiar y generar archivos"):
         file_name=f"{base}_LIMPIO.csv",
         mime="text/csv",
     )
+
 
