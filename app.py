@@ -10,7 +10,7 @@ st.set_page_config(page_title="Limpieza Talk", page_icon="🧼", layout="wide")
 st.title("🧼 Limpieza para carga en Talk")
 st.caption(
     "Sube Excel/CSV/TXT (SIN celdas combinadas y con encabezados en la primera fila). "
-    "Limpieza inteligente: detecta columnas numéricas, indicativos país y aplica reglas Talk."
+    "Limpieza inteligente: numéricos, indicativos país, correos y truncamiento a 30 con reporte."
 )
 
 # ======================================================
@@ -40,7 +40,8 @@ def read_any_table(file_name: str, file_bytes: bytes) -> pd.DataFrame:
 # ======================================================
 # Helpers base
 # ======================================================
-DISALLOWED_SIGNS = r",\.\-\$\%\#\(\)\/"  # para texto (Regla 3) - ojo: en numérico NO quitamos '.'
+# Para TEXTO (Regla 3): se eliminan estos signos
+DISALLOWED_SIGNS = r",\.\-\$\%\#\(\)\/"
 INVISIBLE_CHARS_PATTERN = re.compile(r"[\uFEFF\u200B\u200C\u200D\u2060\u00AD]")
 
 def remove_invisibles(s: str) -> str:
@@ -65,8 +66,7 @@ NUM_LIKE_RE = re.compile(r"^[\s\+\-]?[0-9\s\.,\*%$#()\/-]+$")  # permisivo para 
 def is_numeric_like_value(v: object) -> bool:
     if pd.isna(v):
         return False
-    s = str(v)
-    s = remove_invisibles(s).strip()
+    s = remove_invisibles(str(v)).strip()
     if s == "":
         return False
     return bool(NUM_LIKE_RE.match(s))
@@ -78,15 +78,16 @@ def detect_numeric_columns(df: pd.DataFrame, sample_size: int = 80, threshold: f
         if series.empty:
             continue
         sample = series.head(sample_size)
-        good = 0
-        total = 0
+
+        good, total = 0, 0
         for v in sample:
-            v = v.strip()
+            v = str(v).strip()
             if v == "":
                 continue
             total += 1
             if is_numeric_like_value(v):
                 good += 1
+
         if total > 0 and (good / total) >= threshold:
             numeric_cols.add(c)
     return numeric_cols
@@ -94,36 +95,31 @@ def detect_numeric_columns(df: pd.DataFrame, sample_size: int = 80, threshold: f
 def looks_like_country_code_value(v: object) -> bool:
     if pd.isna(v):
         return False
-    s = str(v)
-    s = remove_invisibles(s).strip()
+    s = remove_invisibles(str(v)).strip()
     if s == "":
         return False
-    # +507, 507, +57, 57 etc, cortos
-    if re.fullmatch(r"\+?\d{1,4}", s):
-        return True
-    # a veces viene "+507 " o " +507"
     s2 = re.sub(r"\s+", "", s)
     return bool(re.fullmatch(r"\+?\d{1,4}", s2))
 
-def detect_country_code_columns(df: pd.DataFrame, numeric_cols: set, sample_size: int = 80, threshold: float = 0.75) -> set:
+def detect_country_code_columns(df: pd.DataFrame, sample_size: int = 80, threshold: float = 0.75) -> set:
     cc_cols = set()
     for c in df.columns:
         name = str(c).strip().lower()
 
         # Heurística por nombre
         name_hit = any(k in name for k in [
-            "indicativo", "codigo pais", "código pais", "pais", "country code", "código país"
+            "indicativo", "codigo pais", "código pais", "código país",
+            "pais", "country code", "prefijo", "prefijo pais"
         ])
 
         series = df[c].dropna().astype(str)
         if series.empty:
             continue
-
         sample = series.head(sample_size)
-        total = 0
-        good = 0
+
+        good, total = 0, 0
         for v in sample:
-            v = v.strip()
+            v = str(v).strip()
             if v == "":
                 continue
             total += 1
@@ -132,8 +128,6 @@ def detect_country_code_columns(df: pd.DataFrame, numeric_cols: set, sample_size
 
         value_hit = (total > 0 and (good / total) >= threshold)
 
-        # Importante: si la col es numérica no la excluimos, porque indicativo también se ve "numérico".
-        # Preferimos marcarla como country_code si cumple.
         if name_hit or value_hit:
             cc_cols.add(c)
 
@@ -145,41 +139,58 @@ def detect_country_code_columns(df: pd.DataFrame, numeric_cols: set, sample_size
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 def clean_email_one(val: object) -> tuple[str, str | None]:
+    """
+    Regla 5 ajustada:
+    - Si hay 2+ correos en la celda, toma el PRIMERO válido.
+    - Reporta advertencia.
+    """
     if pd.isna(val) or str(val).strip() == "":
         return ("", "Correo vacío")
+
     raw = remove_invisibles(str(val)).strip()
 
-    # si hay separadores típicos de múltiples correos
-    if any(sep in raw for sep in [";", ",", "/", "|"]):
-        return ("", "Más de un correo o separadores detectados")
+    # separadores comunes en listas de correos
+    parts = re.split(r"[;,\|/]+", raw)
 
-    email = raw.replace(" ", "")
-    if not EMAIL_RE.match(email):
-        return ("", "Correo inválido")
-    return (email.lower(), None)
+    # si no hay separadores pero hay más de un '@', puede venir separados por espacios
+    if len(parts) == 1 and raw.count("@") > 1:
+        parts = re.split(r"\s+", raw)
 
-def clean_text_general(val: object, apply_nompropio: bool = True) -> str:
+    candidates = [p.strip().replace(" ", "") for p in parts if p and p.strip()]
+    valid_emails = [c for c in candidates if EMAIL_RE.match(c)]
+
+    if not valid_emails:
+        return ("", "Correo inválido (o múltiples sin formato válido)")
+
+    chosen = valid_emails[0].lower()
+
+    if len(valid_emails) > 1:
+        return (chosen, f"Había {len(valid_emails)} correos; se tomó el primero")
+
+    return (chosen, None)
+
+def clean_text_general(val: object) -> str:
     """
-    Reglas 1-3 para TEXTO:
+    Reglas 1-3 para TEXTO (siempre NOMPROPIO):
     - trim
     - sin tildes
     - sin caracteres especiales (incluye , . - $ % # ( / ))
-    - mantiene espacios (colapsa múltiple a 1)
+    - conserva espacios internos (colapsa múltiples a 1)
     """
     if pd.isna(val):
         return ""
-    s = remove_invisibles(str(val))
-    s = s.strip()
+    s = remove_invisibles(str(val)).strip()
     if s == "":
         return ""
+
     s = strip_accents(s)
-    # reemplaza signos prohibidos por espacio
-    s = re.sub(f"[{DISALLOWED_SIGNS}]", " ", s)
-    # quita otros especiales, deja letras/números/espacios
-    s = re.sub(r"[^A-Za-z0-9\s]", " ", s)
+    s = re.sub(f"[{DISALLOWED_SIGNS}]", " ", s)  # quita signos listados
+    s = re.sub(r"[^A-Za-z0-9\s]", " ", s)        # quita otros especiales
     s = collapse_spaces(s).strip()
-    if apply_nompropio and s:
+
+    if s:
         s = nompropio_like_excel(s)
+
     return s
 
 def clean_numeric_general(val: object) -> str:
@@ -188,7 +199,7 @@ def clean_numeric_general(val: object) -> str:
     - trim
     - quita espacios internos
     - convierte coma a punto para decimal
-    - elimina caracteres basura (como '*', '$', '%', etc)
+    - elimina basura (*, $, etc)
     - conserva '.' como decimal
     Ej: ' 3 ,45* ' -> '3.45'
     """
@@ -197,21 +208,18 @@ def clean_numeric_general(val: object) -> str:
     s = remove_invisibles(str(val)).strip()
     if s == "":
         return ""
-    # quita espacios internos
+
     s = re.sub(r"\s+", "", s)
-    # convierte coma a punto
     s = s.replace(",", ".")
-    # deja solo dígitos, punto, signo +/-
     s = re.sub(r"[^0-9\.\+\-]", "", s)
 
-    # si quedan múltiples puntos, intentamos quedarnos con el primero como decimal y borrar los demás
     if s.count(".") > 1:
         parts = s.split(".")
         s = parts[0] + "." + "".join(parts[1:])
 
-    # casos extremos: solo '+' o '-' o '.'
     if s in ["+", "-", ".", "+.", "-."]:
         return ""
+
     return s
 
 def clean_country_code(val: object) -> str:
@@ -219,7 +227,6 @@ def clean_country_code(val: object) -> str:
     Indicativo país:
     - conserva '+' si venía
     - deja solo + y dígitos
-    Ej '+507' -> '+507', '507' -> '507'
     """
     if pd.isna(val):
         return ""
@@ -236,24 +243,20 @@ def clean_country_code(val: object) -> str:
 def clean_apto_keep_inner_spaces(val: object) -> str:
     """
     Regla 4 (Apto):
-    - limpieza general de especiales, pero:
-      * NO colapsa ni elimina espacios internos
-      * solo quita espacios al inicio/fin
+    - quita espacios al inicio/fin
+    - mantiene espacios internos intactos
     - quita tildes
-    - elimina caracteres especiales (dejando letras/números/espacios)
+    - elimina caracteres especiales (deja letras/números/espacios)
     """
     if pd.isna(val):
         return ""
-    s = remove_invisibles(str(val))
-    s = s.strip()  # quita bordes, mantiene internos
+    s = remove_invisibles(str(val)).strip()
     if s == "":
         return ""
     s = strip_accents(s)
-    # elimina signos prohibidos SIN convertir a un solo espacio (ponemos "")
     s = re.sub(f"[{DISALLOWED_SIGNS}]", "", s)
-    # elimina otros especiales, dejando letras/números/espacios
     s = re.sub(r"[^A-Za-z0-9\s]", "", s)
-    # NO tocamos espacios internos
+    # NO colapsamos espacios internos
     return s
 
 def validate_len(s: str, max_len: int = 30) -> str | None:
@@ -291,21 +294,14 @@ with c2:
 with c3:
     max30_cols = st.multiselect("Columnas con máximo 30 caracteres (Regla 6)", cols, default=[])
 
-apply_proper = st.checkbox("Aplicar NOMPROPIO / Capitalización (Regla 1)", value=True)
-truncate_long = st.checkbox("✂️ Truncar automáticamente si pasa 30 (si no, solo reporta error)", value=False)
-
-st.caption(
-    "La app detecta automáticamente columnas numéricas (para no dañar decimales) y columnas de indicativo país (para conservar '+')."
-)
+st.caption("NOMPROPIO siempre activo. Truncamiento a 30 siempre activo (solo en columnas seleccionadas) y se reporta en ERRORES.")
 
 st.divider()
 
 if st.button("🚀 Limpiar y generar archivos"):
-    # Detectar tipos de columnas una sola vez
     numeric_cols = detect_numeric_columns(df)
-    country_code_cols = detect_country_code_columns(df, numeric_cols)
+    country_code_cols = detect_country_code_columns(df)
 
-    # Nota: si una col está en country_code_cols, se trata como indicativo (prioridad)
     df_clean = df.copy()
     error_rows = []
 
@@ -315,17 +311,17 @@ if st.button("🚀 Limpiar y generar archivos"):
         for c in df_clean.columns:
             raw_val = row.get(c)
 
-            # Prioridad: indicativo país
+            # Indicativo país (prioridad)
             if c in country_code_cols:
                 df_clean.at[idx, c] = clean_country_code(raw_val)
                 continue
 
-            # Columna apartamento seleccionada (regla 4)
+            # Apartamento seleccionado (Regla 4)
             if apt_col != "(Ninguna)" and c == apt_col:
                 df_clean.at[idx, c] = clean_apto_keep_inner_spaces(raw_val)
                 continue
 
-            # Columna email seleccionada (regla 5)
+            # Correo seleccionado (Regla 5)
             if email_col != "(Ninguna)" and c == email_col:
                 email, e = clean_email_one(raw_val)
                 df_clean.at[idx, c] = email
@@ -333,25 +329,25 @@ if st.button("🚀 Limpiar y generar archivos"):
                     row_errs.append(f"{c}: {e}")
                 continue
 
-            # Numéricas: mantener decimales y limpiar basura
+            # Numéricas: conservar decimales con '.'
             if c in numeric_cols:
                 df_clean.at[idx, c] = clean_numeric_general(raw_val)
                 continue
 
-            # Texto general: reglas 1-3
-            df_clean.at[idx, c] = clean_text_general(raw_val, apply_nompropio=apply_proper)
+            # Texto: Reglas 1-3
+            df_clean.at[idx, c] = clean_text_general(raw_val)
 
-        # Regla 6: máximo 30 en columnas seleccionadas
+        # Regla 6: máximo 30 (TRUNCA y reporta)
         for c in max30_cols:
             s = "" if pd.isna(df_clean.at[idx, c]) else str(df_clean.at[idx, c])
             len_err = validate_len(s, 30)
             if len_err:
-                if truncate_long:
-                    df_clean.at[idx, c] = s[:30]
-                row_errs.append(f"{c}: {len_err}")
+                original_len = len(s)
+                df_clean.at[idx, c] = s[:30]
+                row_errs.append(f"{c}: {len_err} -> TRUNCADO a 30")
 
         if row_errs:
-            # fila_origen en Excel: header es fila 1, datos inician en fila 2
+            # fila_origen excel: header fila 1, datos desde fila 2
             error_rows.append({"fila_origen": idx + 2, "errores": " | ".join(row_errs)})
 
     err_df = pd.DataFrame(error_rows)
@@ -360,11 +356,10 @@ if st.button("🚀 Limpiar y generar archivos"):
     st.subheader("Vista previa (limpio)")
     st.dataframe(df_clean.head(20), use_container_width=True)
 
-    st.subheader("Errores encontrados")
-    st.write(f"Total filas con error: {len(err_df)}")
-    st.dataframe(err_df.head(50), use_container_width=True)
+    st.subheader("Errores / Advertencias")
+    st.write(f"Total filas con notas (errores o truncamientos): {len(err_df)}")
+    st.dataframe(err_df.head(100), use_container_width=True)
 
-    # Export Excel con 2 hojas: LIMPIO + ERRORES
     out_xlsx = io.BytesIO()
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
         df_clean.to_excel(writer, index=False, sheet_name="LIMPIO")
